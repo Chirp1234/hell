@@ -1,0 +1,14 @@
+Welcome to NOTEVIEW!
+
+Controls in a note:
+- up/down: scroll one line
+- left/right: previous/next page
+- enter: next page
+- clear: back to the note list
+
+Controls in the note list:
+- up/down: choose a note
+- enter or right: open it
+- clear: quit
+
+Make your own notes as .txt or .md files. Each file becomes one note, named after the file. Long lines wrap automatically to fit the 31-character screen.

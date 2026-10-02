@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TI Note Converter</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --ink:#1d2330; --muted:#5c6475; --line:#d9dde5; --accent:#2563eb; --accent-ink:#fff; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#14171d; --card:#1d2129; --ink:#e7eaf0; --muted:#9aa3b5; --line:#323846; --accent:#60a5fa; --accent-ink:#0b1220; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.5 system-ui, sans-serif; }
+  main { max-width:760px; margin:0 auto; padding:24px 16px 48px; }
+  h1 { font-size:1.6rem; margin:0 0 4px; }
+  p { color:var(--muted); margin:0 0 16px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; margin-bottom:16px; }
+  .drop { border:2px dashed var(--line); border-radius:10px; padding:28px 12px; text-align:center; cursor:pointer; }
+  .drop.over { border-color:var(--accent); }
+  button { background:var(--accent); color:var(--accent-ink); border:0; border-radius:8px; padding:10px 16px; font:inherit; font-weight:600; cursor:pointer; }
+  button:disabled { opacity:.45; cursor:default; }
+  ul { list-style:none; margin:12px 0 0; padding:0; }
+  li { display:flex; justify-content:space-between; gap:8px; padding:6px 0; border-top:1px solid var(--line); }
+  li span:last-child { color:var(--muted); white-space:nowrap; }
+  .screen { font:13px/1.25 ui-monospace, Menlo, Consolas, monospace; background:#0f1a0f; color:#c8f7c5; padding:10px; border-radius:8px; white-space:pre; overflow-x:auto; }
+  ol { padding-left:20px; margin:0; }
+  ol li { display:list-item; border:0; padding:2px 0; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  label.small { color:var(--muted); font-size:.9rem; }
+</style>
+</head>
+<body>
+<main>
+  <h1>TI-84 Plus CE note converter</h1>
+  <p>Turns .txt / .md notes into files the NOTEVIEW calculator app can read. Everything runs in your browser; nothing is uploaded anywhere.</p>
+
+  <div class="card">
+    <div class="drop" id="drop">Drop note files here, or click to choose<br><small>(.txt or .md, one note per file)</small></div>
+    <input type="file" id="pick" accept=".txt,.md,.text" multiple hidden>
+    <ul id="list"></ul>
+  </div>
+
+  <div class="card">
+    <div class="row">
+      <button id="go" disabled>Download ti_notes.zip</button>
+      <button id="clear" disabled>Clear list</button>
+      <label class="small"><input type="checkbox" id="viewer" checked> include NOTEVIEW.py</label>
+    </div>
+    <p style="margin-top:12px">Preview of the first note on the calculator screen:</p>
+    <div class="screen" id="preview">(no notes yet)</div>
+  </div>
+
+  <div class="card">
+    <strong>Then</strong>
+    <ol>
+      <li>Unzip ti_notes.zip.</li>
+      <li>Open TI Connect CE and connect the calculator.</li>
+      <li>Drag every .py file from the folder onto the calculator.</li>
+      <li>On the calculator: [prgm] → Python App → NOTEVIEW → Run.</li>
+    </ol>
+  </div>
+</main>
+
+<script id="core">
+// Keep in sync with converter/notes2ti.py
+var WIDTH = 31, CHUNK = 120;
+var REPLACE = {
+  "‘":"'","’":"'","‚":"'","‛":"'","“":'"',"”":'"',"„":'"',"′":"'","″":'"',
+  "–":"-","—":"--","―":"--","−":"-","…":"...","•":"*","·":"*","●":"*","◦":"o",
+  " ":" "," ":" ","​":"","×":"x","÷":"/","±":"+/-","≠":"!=","≤":"<=","≥":">=",
+  "≈":"~=","∞":"inf","→":"->","←":"<-","↔":"<->","⇒":"=>","°":" deg","²":"^2",
+  "³":"^3","√":"sqrt","π":"pi","θ":"theta","Δ":"delta","δ":"delta","Σ":"sum","μ":"u",
+  "α":"alpha","β":"beta","λ":"lambda","σ":"sigma","Ω":"ohm","ω":"omega"
+};
+
+function toAscii(text) {
+  var out = "";
+  for (var ch of text) {
+    var c = ch.codePointAt(0);
+    if (ch in REPLACE) out += REPLACE[ch];
+    else if (ch === "\t") out += "  ";
+    else if (c >= 32 && c < 127) out += ch;
+    else {
+      var base = ch.normalize("NFKD").replace(/[^\x20-\x7e]/g, "");
+      out += base || "?";
+    }
+  }
+  return out;
+}
+
+// Greedy word wrap; words longer than a line are split.
+function wrapLine(text, width, first, rest) {
+  var lines = [], cur = null;
+  text.split(/ +/).forEach(function (w) {
+    if (cur !== null && cur.length + 1 + w.length <= width) { cur += " " + w; return; }
+    if (cur !== null) lines.push(cur);
+    var pre = lines.length ? rest : first;
+    while (pre.length + w.length > width) {
+      var room = Math.max(1, width - pre.length);
+      lines.push(pre + w.slice(0, room));
+      w = w.slice(room);
+      pre = rest;
+    }
+    cur = w.length ? pre + w : null;
+  });
+  if (cur !== null) lines.push(cur);
+  return lines;
+}
+
+function wrap(text, width) {
+  width = width || WIDTH;
+  var lines = [];
+  for (var raw of text.replace(/\r\n?/g, "\n").split("\n")) {
+    raw = toAscii(raw).replace(/\s+$/, "");
+    if (!raw) { lines.push(""); continue; }
+    var indent = raw.slice(0, raw.length - raw.replace(/^\s+/, "").length).slice(0, Math.floor(width / 3));
+    var m = raw.match(/^\s*([-*+]|\d+[.)])\s+/);
+    var hang = m ? " ".repeat(Math.min(m[0].length, Math.floor(width / 3))) : indent;
+    var got = wrapLine(raw.trim(), width, indent, hang);
+    lines.push.apply(lines, got.length ? got : [""]);
+  }
+  while (lines.length && !lines[lines.length - 1]) lines.pop();
+  return lines;
+}
+
+// Same quoting as Python's repr() for printable ASCII.
+function pyStr(s) {
+  var q = s.indexOf("'") >= 0 && s.indexOf('"') < 0 ? '"' : "'";
+  return q + s.replace(/\\/g, "\\\\").replace(new RegExp(q, "g"), "\\" + q) + q;
+}
+
+function pyTuple(items) {
+  return items.length ? "(\n" + items.map(function (s) { return s + ",\n"; }).join("") + ")" : "()";
+}
+
+function pad(n, k) { return String(n).padStart(k, "0"); }
+
+// notes: [[title, text], ...] -> {filename: contents}
+function build(notes, width, chunk) {
+  chunk = chunk || CHUNK;
+  if (notes.length > 999) throw new Error("too many notes (max 999)");
+  var files = {}, index = [];
+  notes.forEach(function (note, i) {
+    var nid = i + 1, lines = wrap(note[1], width);
+    var parts = Math.ceil(lines.length / chunk);
+    if (parts > 100) throw new Error("note '" + note[0] + "' is too long (max " + 100 * chunk + " lines)");
+    for (var c = 0; c < parts; c++)
+      files["N" + pad(nid, 3) + pad(c, 2) + ".py"] =
+        "L=" + pyTuple(lines.slice(c * chunk, (c + 1) * chunk).map(pyStr)) + "\n";
+    index.push("(" + pyStr(note[0].slice(0, 40)) + ", " + nid + ", " + lines.length + ")");
+  });
+  files["NOTEIDX.py"] = "C=" + chunk + "\nN=" + pyTuple(index) + "\n";
+  return files;
+}
+
+function titleFor(name) {
+  return toAscii(name.replace(/\.[^.]*$/, "").replace(/_/g, " ")).trim() || "untitled";
+}
+
+// Minimal uncompressed ZIP writer
+var CRC = (function () {
+  var t = new Uint32Array(256);
+  for (var n = 0; n < 256; n++) { var c = n; for (var k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; }
+  return t;
+})();
+function crc32(b) { var c = 0xffffffff; for (var i = 0; i < b.length; i++) c = CRC[(c ^ b[i]) & 255] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; }
+function zip(files) {
+  var enc = new TextEncoder(), chunks = [], central = [], off = 0;
+  function hdr(size) { return new DataView(new ArrayBuffer(size)); }
+  for (var name in files) {
+    var nb = enc.encode(name), data = enc.encode(files[name]), crc = crc32(data);
+    var h = hdr(30);
+    h.setUint32(0, 0x04034b50, true); h.setUint16(4, 10, true);
+    h.setUint16(12, 0x21, true);
+    h.setUint32(14, crc, true); h.setUint32(18, data.length, true); h.setUint32(22, data.length, true);
+    h.setUint16(26, nb.length, true);
+    chunks.push(new Uint8Array(h.buffer), nb, data);
+    var d = hdr(46);
+    d.setUint32(0, 0x02014b50, true); d.setUint16(4, 20, true); d.setUint16(6, 10, true);
+    d.setUint16(14, 0x21, true);
+    d.setUint32(16, crc, true); d.setUint32(20, data.length, true); d.setUint32(24, data.length, true);
+    d.setUint16(28, nb.length, true); d.setUint32(42, off, true);
+    central.push(new Uint8Array(d.buffer), nb);
+    off += 30 + nb.length + data.length;
+  }
+  var csize = central.reduce(function (s, a) { return s + a.length; }, 0);
+  var e = hdr(22), count = Object.keys(files).length;
+  e.setUint32(0, 0x06054b50, true); e.setUint16(8, count, true); e.setUint16(10, count, true);
+  e.setUint32(12, csize, true); e.setUint32(16, off, true);
+  return new Blob(chunks.concat(central, [new Uint8Array(e.buffer)]), { type: "application/zip" });
+}
+</script>
+
+<script>
+var VIEWER_SRC = "# NOTEVIEW - note reader for TI-84 Plus CE Python\n# Needs NOTEIDX.py + N*.py files made by the converter.\n#\n# Menu:   up/down select, enter/right open, clear quit\n# Reader: up/down scroll, left/right page,\n#         enter next page, clear back\n\nW=31  # screen columns used\nH=8   # text rows per screen\n\nUP=1\nDN=2\nLF=3\nRT=4\nOK=5\nBK=6\n\ntry:\n  from ti_system import wait_key\n  KEYS=1\nexcept:\n  KEYS=0\n\ntry:\n  from ti_system import disp_clr\nexcept:\n  def disp_clr():\n    print(\"\\n\"*12)\n\n# TI-OS key codes returned by wait_key()\nKMAP={3:UP,4:DN,2:LF,1:RT,5:OK,9:BK,10:BK}\n# typed commands when wait_key() is missing\nTMAP={\"8\":UP,\"2\":DN,\"4\":LF,\"6\":RT,\"\":OK,\"0\":BK,\"q\":BK}\n\ndef getk():\n  while 1:\n    if KEYS:\n      k=KMAP.get(wait_key())\n    else:\n      k=TMAP.get(input(\"8/2/4/6 move,0 back:\").strip())\n    if k:\n      return k\n\ndef imp(n):\n  try:\n    try:\n      return __import__(n)\n    except NameError:\n      g={}\n      exec(\"import \"+n,g)\n      return g[n]\n  except:\n    return None\n\ndef forget(n):\n  try:\n    import sys\n    del sys.modules[n]\n  except:\n    pass\n  try:\n    import gc\n    gc.collect()\n  except:\n    pass\n\ndef foot(s):\n  print(s[:W],end=\"\")\n\ndef reader(e,C):\n  t=e[0]\n  nid=e[1]\n  n=e[2]\n  top=0\n  cache={}\n  while 1:\n    need={}\n    for i in range(top,min(top+H,n)):\n      need[i//C]=1\n    for c in list(cache):\n      if c not in need:\n        del cache[c]\n    for c in need:\n      if c not in cache:\n        nm=\"N%03d%02d\"%(nid,c)\n        m=imp(nm)\n        cache[c]=m.L if m else ()\n        forget(nm)\n    disp_clr()\n    print(t[:W])\n    for i in range(top,top+H):\n      s=\"\"\n      if i<n:\n        L=cache[i//C]\n        j=i%C\n        if j<len(L):\n          s=L[j]\n        else:\n          s=\"?missing file N%03d%02d\"%(nid,i//C)\n      print(s[:W])\n    if n:\n      p=\"%d-%d/%d\"%(top+1,min(top+H,n),n)\n    else:\n      p=\"(empty)\"\n    foot(p+\"  clear:back\")\n    k=getk()\n    if k==BK:\n      return\n    if k==DN:\n      top+=1\n    elif k==UP:\n      top-=1\n    elif k==RT or k==OK:\n      top+=H\n    elif k==LF:\n      top-=H\n    if top>n-H:\n      top=n-H\n    if top<0:\n      top=0\n\ndef main():\n  x=imp(\"NOTEIDX\")\n  if not x:\n    disp_clr()\n    print(\"No notes found.\")\n    print(\"Send NOTEIDX.py and the\")\n    print(\"N*.py files made by the\")\n    print(\"converter, then run again.\")\n    return\n  N=x.N\n  C=x.C\n  forget(\"NOTEIDX\")\n  sel=0\n  top=0\n  while 1:\n    disp_clr()\n    print(\"NOTES (%d)\"%len(N))\n    for i in range(top,top+H):\n      s=\"\"\n      if i<len(N):\n        s=(\"> \" if i==sel else \"  \")+N[i][0]\n      print(s[:W])\n    foot(\"enter:open  clear:quit\")\n    k=getk()\n    if k==BK:\n      disp_clr()\n      return\n    if not N:\n      continue\n    if k==DN:\n      sel=(sel+1)%len(N)\n    elif k==UP:\n      sel=(sel-1)%len(N)\n    elif k==OK or k==RT:\n      reader(N[sel],C)\n    if sel<top:\n      top=sel\n    if sel>=top+H:\n      top=sel-H+1\n\nmain()\n";
+var notes = [];
+var drop = document.getElementById("drop"), pick = document.getElementById("pick");
+var list = document.getElementById("list"), go = document.getElementById("go");
+var preview = document.getElementById("preview"), withViewer = document.getElementById("viewer");
+var clearBtn = document.getElementById("clear");
+
+function render() {
+  list.innerHTML = "";
+  notes.forEach(function (n, i) {
+    var li = document.createElement("li");
+    var a = document.createElement("span"), b = document.createElement("span");
+    a.textContent = (i + 1) + ". " + n[0];
+    var count = wrap(n[1]).length;
+    b.textContent = count + (count === 1 ? " line" : " lines");
+    li.append(a, b); list.append(li);
+  });
+  go.disabled = clearBtn.disabled = !notes.length;
+  if (!notes.length) preview.textContent = "(no notes yet)";
+  if (notes.length) {
+    var lines = wrap(notes[0][1]), shown = lines.slice(0, 8);
+    while (shown.length < 8) shown.push("");
+    preview.textContent = [notes[0][0].slice(0, WIDTH)].concat(shown,
+      [(lines.length ? "1-" + Math.min(8, lines.length) + "/" + lines.length : "(empty)") + "  clear:back"]).join("\n");
+  }
+}
+
+function add(fileList) {
+  var files = Array.from(fileList).filter(function (f) { return /\.(txt|md|text)$/i.test(f.name); });
+  Promise.all(files.map(function (f) { return f.text().then(function (t) { return [titleFor(f.name), t, f.name]; }); }))
+    .then(function (got) {
+      got.forEach(function (g) {
+        notes = notes.filter(function (n) { return n[2] !== g[2]; });
+        notes.push(g);
+      });
+      notes.sort(function (a, b) { return a[2].toLowerCase() < b[2].toLowerCase() ? -1 : 1; });
+      render();
+    });
+}
+
+drop.onclick = function () { pick.click(); };
+clearBtn.onclick = function () { notes = []; render(); };
+pick.onchange = function () { add(pick.files); pick.value = ""; };
+drop.ondragover = function (e) { e.preventDefault(); drop.classList.add("over"); };
+drop.ondragleave = function () { drop.classList.remove("over"); };
+drop.ondrop = function (e) { e.preventDefault(); drop.classList.remove("over"); add(e.dataTransfer.files); };
+
+go.onclick = function () {
+  var files;
+  try { files = build(notes); } catch (err) { alert(err.message); return; }
+  if (withViewer.checked) files["NOTEVIEW.py"] = VIEWER_SRC;
+  var a = document.createElement("a");
+  a.href = URL.createObjectURL(zip(files));
+  a.download = "ti_notes.zip";
+  a.click();
+  setTimeout(function () { URL.revokeObjectURL(a.href); }, 5000);
+};
+</script>
+</body>
+</html>
